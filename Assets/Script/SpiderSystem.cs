@@ -1,8 +1,8 @@
 // ============================================================
-//  SPIDER SYSTEM v4
-//  1. Supprime tous tes anciens scripts spider
-//  2. Copie CE fichier dans Assets/
-//  3. Tools > Spider Setup > Glisse Body > GENERER > Play
+//  SPIDER SYSTEM v5 - TOUT EN UN
+//  1. Supprime tous les anciens scripts spider de ton projet
+//  2. Mets CE fichier dans Assets/
+//  3. Tools > Spider Setup > glisse Body > GENERER > Play
 // ============================================================
 
 using UnityEngine;
@@ -22,12 +22,12 @@ public class SpiderController : MonoBehaviour
     public float rotateSpeed = 90f;
 
     [Header("Sol")]
-    public float hoverHeight = 0.35f;
-    public float alignSpeed  = 6f;
+    public float hoverHeight = 0.4f;
+    public float alignSpeed  = 5f;
 
     [Header("Camera")]
     public Transform cameraTarget;
-    public float camSmooth = 5f;
+    public float     camSmooth = 5f;
 
     [HideInInspector] public Vector3 groundNormal = Vector3.up;
 
@@ -39,193 +39,242 @@ public class SpiderController : MonoBehaviour
         _rb = GetComponent<Rigidbody>();
         _rb.freezeRotation = true;
         _rb.interpolation  = RigidbodyInterpolation.Interpolate;
-        _rb.linearDamping  = 5f;
-        _rb.angularDamping = 5f;
+        _rb.linearDamping  = 6f;
+        _rb.angularDamping = 6f;
         _cam = Camera.main;
         if (_cam) _cam.transform.SetParent(null);
     }
 
     void Update()
     {
+        // Rotation
         float h = Input.GetAxis("Horizontal");
         transform.Rotate(0f, h * rotateSpeed * Time.deltaTime, 0f, Space.Self);
-        UpdateGroundNormal();
-        AlignBodyRotation();
-        MoveCamera();
+
+        // Normale du sol
+        if (Physics.Raycast(transform.position + Vector3.up * 0.5f,
+                            Vector3.down, out RaycastHit hit, 4f))
+            groundNormal = Vector3.Lerp(groundNormal, hit.normal,
+                                        Time.deltaTime * alignSpeed).normalized;
+
+        // Incline le corps
+        Quaternion tgt = Quaternion.FromToRotation(transform.up, groundNormal) * transform.rotation;
+        transform.rotation = Quaternion.Slerp(transform.rotation, tgt,
+                                               Time.deltaTime * alignSpeed);
+
+        // Camera
+        if (cameraTarget && _cam)
+        {
+            _cam.transform.position = Vector3.Lerp(_cam.transform.position,
+                                                    cameraTarget.position,
+                                                    Time.deltaTime * camSmooth);
+            _cam.transform.LookAt(transform.position + Vector3.up * 0.4f);
+        }
     }
 
     void FixedUpdate()
     {
+        // Avance/recule
         float v = Input.GetAxis("Vertical");
         Vector3 fwd = Vector3.ProjectOnPlane(transform.forward, groundNormal).normalized;
-        _rb.linearVelocity = new Vector3(fwd.x * v * moveSpeed, _rb.linearVelocity.y, fwd.z * v * moveSpeed);
+        _rb.linearVelocity = new Vector3(fwd.x * v * moveSpeed,
+                                         _rb.linearVelocity.y,
+                                         fwd.z * v * moveSpeed);
 
-        if (Physics.Raycast(transform.position + Vector3.up * 0.5f, Vector3.down, out RaycastHit hit, 4f))
+        // Hover
+        if (Physics.Raycast(transform.position + Vector3.up * 0.5f,
+                            Vector3.down, out RaycastHit hit, 5f))
         {
             float diff = (hit.point.y + hoverHeight) - transform.position.y;
-            _rb.linearVelocity = new Vector3(_rb.linearVelocity.x, Mathf.Clamp(diff * 10f, -8f, 8f), _rb.linearVelocity.z);
+            _rb.linearVelocity = new Vector3(_rb.linearVelocity.x,
+                                             Mathf.Clamp(diff * 12f, -10f, 10f),
+                                             _rb.linearVelocity.z);
         }
-    }
-
-    void UpdateGroundNormal()
-    {
-        if (Physics.Raycast(transform.position + Vector3.up * 0.5f, Vector3.down, out RaycastHit hit, 3f))
-            groundNormal = Vector3.Lerp(groundNormal, hit.normal, Time.deltaTime * alignSpeed).normalized;
-    }
-
-    void AlignBodyRotation()
-    {
-        Quaternion t = Quaternion.FromToRotation(transform.up, groundNormal) * transform.rotation;
-        transform.rotation = Quaternion.Slerp(transform.rotation, t, Time.deltaTime * alignSpeed);
-    }
-
-    void MoveCamera()
-    {
-        if (!cameraTarget || !_cam) return;
-        _cam.transform.position = Vector3.Lerp(_cam.transform.position, cameraTarget.position, Time.deltaTime * camSmooth);
-        _cam.transform.LookAt(transform.position + Vector3.up * 0.3f);
     }
 }
 
 // ============================================================
-//  SPIDER LEG
+//  SPIDER LEG  —  IK par positionnement direct des os
 // ============================================================
 public class SpiderLeg : MonoBehaviour
 {
-    [Header("Joints IK")]
-    public Transform shoulderJoint;
-    public Transform kneeJoint;
+    // Transforms
+    public Transform shoulderBone;  // os supérieur (cuisse)
+    public Transform kneeBone;      // os inférieur (tibia)
+    public Transform poleTarget;    // guide la flexion du genou
 
-    [Header("Longueurs")]
+    // Longueurs
     public float upperLen = 0.55f;
     public float lowerLen = 0.55f;
 
-    [Header("Pole")]
-    public Transform pole;
-
-    [Header("Pas")]
+    // Pas
     public float stepDist   = 0.32f;
-    public float stepHeight = 0.15f;
-    public float stepSpeed  = 10f;
-    public float floorOff   = 0.04f;
+    public float stepHeight = 0.16f;
+    public float stepSpeed  = 9f;
+    public float groundOff  = 0.04f;
 
-    [Header("Repos local (body space)")]
+    // Repos en espace local du body
     public Vector3 restLocal;
 
-    [Header("Patte opposee")]
+    // Synchronisation
     public SpiderLeg opposite;
 
+    // ---- runtime ----
     [HideInInspector] public bool isStepping;
-
-    Vector3 _cur, _tgt, _from;
-    float   _t = 1f;
+    Vector3          _footPos;   // position monde courante du pied
+    Vector3          _footFrom;
+    Vector3          _footTo;
+    float            _stepT = 1f;
     SpiderController _body;
 
+    // -------------------------------------------------------
     void Start()
     {
         _body = GetComponentInParent<SpiderController>();
-        // Initialise le pied sur le sol sous la position de repos
-        Vector3 rest = RestWorld();
-        if (Physics.Raycast(rest + Vector3.up * 1.5f, Vector3.down, out RaycastHit hit, 4f))
-            _cur = hit.point + Vector3.up * floorOff;
-        else
-            _cur = rest;
-        _tgt = _cur;
+        // Place le pied au sol sous la position de repos
+        _footPos = SnapToGround(RestWorld());
+        _footTo  = _footPos;
     }
 
+    // -------------------------------------------------------
     void LateUpdate()
     {
-        // Declenche un pas si le pied est trop loin de sa position de repos
+        // --- Déclenche un pas ---
         if (!isStepping && (opposite == null || !opposite.isStepping))
         {
-            if (Vector3.Distance(_cur, RestWorld()) > stepDist)
-                BeginStep();
+            if (Vector3.Distance(_footPos, RestWorld()) > stepDist)
+                StartStep();
         }
 
-        // Anime le pas
+        // --- Anime le pas ---
         if (isStepping)
         {
-            _t += Time.deltaTime * stepSpeed;
-            float c = Mathf.Clamp01(_t);
-            _cur = Vector3.Lerp(_from, _tgt, c) + Vector3.up * (Mathf.Sin(c * Mathf.PI) * stepHeight);
-            if (c >= 1f) { _cur = _tgt; isStepping = false; }
+            _stepT += Time.deltaTime * stepSpeed;
+            float c = Mathf.Clamp01(_stepT);
+            Vector3 flat = Vector3.Lerp(_footFrom, _footTo, c);
+            _footPos = flat + Vector3.up * (Mathf.Sin(c * Mathf.PI) * stepHeight);
+            if (c >= 1f) { _footPos = _footTo; isStepping = false; }
         }
 
-        SolveIK();
+        // --- Résout l'IK ---
+        if (shoulderBone != null && kneeBone != null)
+            Solve2BoneIK();
     }
 
-    void BeginStep()
+    // -------------------------------------------------------
+    void StartStep()
     {
-        Vector3 rest = RestWorld();
-        if (Physics.Raycast(rest + Vector3.up * 1.5f, Vector3.down, out RaycastHit hit, 4f))
-            _tgt = hit.point + Vector3.up * floorOff;
-        else
-            _tgt = rest;
-        _from      = _cur;
-        _t         = 0f;
+        _footFrom  = _footPos;
+        _footTo    = SnapToGround(RestWorld());
+        _stepT     = 0f;
         isStepping = true;
     }
 
-    void SolveIK()
+    Vector3 SnapToGround(Vector3 worldPos)
     {
-        if (!shoulderJoint || !kneeJoint) return;
+        Vector3 origin = worldPos + Vector3.up * 1.5f;
+        if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit, 4f))
+            return hit.point + Vector3.up * groundOff;
+        return worldPos;
+    }
 
-        Vector3 A       = shoulderJoint.position;
-        Vector3 target  = _cur;
-        Vector3 polePos = pole ? pole.position : A + Vector3.up;
+    // -------------------------------------------------------
+    //  IK 2 os — positionnement direct, robuste
+    // -------------------------------------------------------
+    void Solve2BoneIK()
+    {
+        Vector3 root   = shoulderBone.position;
+        Vector3 target = _footPos;
 
         float L1   = upperLen;
         float L2   = lowerLen;
-        float dist = Mathf.Clamp(Vector3.Distance(A, target),
-                                 Mathf.Abs(L1 - L2) + 0.001f,
-                                 L1 + L2 - 0.001f);
+        float maxR = L1 + L2 - 0.001f;
+        float minR = Mathf.Abs(L1 - L2) + 0.001f;
 
-        Vector3 dir = (target - A).normalized;
+        // Direction et distance vers le pied
+        Vector3 toTarget = target - root;
+        float dist = toTarget.magnitude;
 
-        // Loi des cosinus -> angle epaule
-        float cosA = Mathf.Clamp((L1*L1 + dist*dist - L2*L2) / (2f*L1*dist), -1f, 1f);
-        float angA = Mathf.Acos(cosA) * Mathf.Rad2Deg;
+        // Si le pied est trop proche ou à l'origine, on évite le NaN
+        if (dist < 0.01f) return;
 
-        // Axe IK perpendiculaire au plan (dir, pole)
-        Vector3 toPole = (polePos - A).normalized;
-        Vector3 axis   = Vector3.Cross(dir, toPole);
-        if (axis.sqrMagnitude < 0.0001f)
-            axis = Vector3.Cross(dir, Vector3.up);
-        axis.Normalize();
+        // Clamp distance
+        dist = Mathf.Clamp(dist, minR, maxR);
+        Vector3 dir = toTarget / toTarget.magnitude;   // direction normalisée AVANT clamp
+        Vector3 clampedTarget = root + dir * dist;
 
-        // Position du genou
-        Vector3 kneePos = A + Quaternion.AngleAxis(-angA, axis) * (dir * L1);
-        kneeJoint.position = kneePos;
+        // Angle à la racine (loi des cosinus)
+        float cosAlpha = (L1 * L1 + dist * dist - L2 * L2) / (2f * L1 * dist);
+        cosAlpha = Mathf.Clamp(cosAlpha, -1f, 1f);
+        float alpha = Mathf.Acos(cosAlpha) * Mathf.Rad2Deg;
 
-        // Reference UP = normale du sol
-        Vector3 up = _body ? _body.groundNormal : Vector3.up;
+        // Vecteur vers le pôle pour définir le plan de l'IK
+        Vector3 polePos = poleTarget != null
+            ? poleTarget.position
+            : root + Vector3.Cross(dir, Vector3.up).normalized * 0.5f + Vector3.up * 0.5f;
 
-        // Oriente epaule vers genou
-        Vector3 d1 = kneePos - A;
-        if (d1.sqrMagnitude > 0.0001f)
-            shoulderJoint.rotation = Quaternion.LookRotation(d1.normalized, up) * Quaternion.Euler(90f, 0f, 0f);
+        Vector3 toPole = polePos - root;
+        // Composante de toPole perpendiculaire à dir
+        Vector3 perpPole = toPole - Vector3.Dot(toPole, dir) * dir;
+        if (perpPole.sqrMagnitude < 0.0001f)
+            perpPole = Vector3.Cross(dir, Vector3.forward);
+        perpPole.Normalize();
 
-        // Oriente genou vers pied
-        Vector3 d2 = target - kneePos;
-        if (d2.sqrMagnitude > 0.0001f)
-            kneeJoint.rotation = Quaternion.LookRotation(d2.normalized, up) * Quaternion.Euler(90f, 0f, 0f);
+        // Position du genou : rotation du vecteur (dir * L1) autour de perpPole
+        Vector3 kneeDir = Quaternion.AngleAxis(alpha, Vector3.Cross(dir, perpPole).normalized) * dir;
+        Vector3 kneePos = root + kneeDir * L1;
+
+        // Place le joint du genou
+        kneeBone.position = kneePos;
+
+        // --- Rotations ---
+        Vector3 up = _body != null ? _body.groundNormal : Vector3.up;
+
+        // Épaule → genou
+        Vector3 upperDir = kneePos - root;
+        if (upperDir.sqrMagnitude > 0.0001f)
+        {
+            shoulderBone.rotation = Quaternion.LookRotation(upperDir.normalized, up)
+                                    * Quaternion.Euler(90f, 0f, 0f);
+        }
+
+        // Genou → pied
+        Vector3 lowerDir = clampedTarget - kneePos;
+        if (lowerDir.sqrMagnitude > 0.0001f)
+        {
+            kneeBone.rotation = Quaternion.LookRotation(lowerDir.normalized, up)
+                                * Quaternion.Euler(90f, 0f, 0f);
+        }
     }
 
-    Vector3 RestWorld() =>
-        _body ? _body.transform.TransformPoint(restLocal) : transform.position;
+    // -------------------------------------------------------
+    Vector3 RestWorld()
+    {
+        if (_body != null) return _body.transform.TransformPoint(restLocal);
+        return transform.position + transform.TransformDirection(restLocal);
+    }
 
+    // -------------------------------------------------------
     void OnDrawGizmos()
     {
         if (!Application.isPlaying) return;
         Gizmos.color = isStepping ? Color.red : Color.green;
-        Gizmos.DrawSphere(_cur, 0.05f);
-        if (_body) { Gizmos.color = Color.yellow; Gizmos.DrawWireSphere(RestWorld(), 0.04f); }
-        if (shoulderJoint) { Gizmos.color = Color.cyan; Gizmos.DrawLine(shoulderJoint.position, _cur); }
+        Gizmos.DrawSphere(_footPos, 0.05f);
+        if (_body != null)
+        {
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawWireSphere(RestWorld(), 0.04f);
+        }
+        if (shoulderBone != null)
+        {
+            Gizmos.color = Color.cyan;
+            Gizmos.DrawLine(shoulderBone.position, _footPos);
+        }
     }
 }
 
 // ============================================================
-//  EDITOR
+//  EDITOR WINDOW
 // ============================================================
 #if UNITY_EDITOR
 public class SpiderSetupWindow : EditorWindow
@@ -237,11 +286,11 @@ public class SpiderSetupWindow : EditorWindow
 
     void OnGUI()
     {
-        GUILayout.Label("Spider Setup v4", EditorStyles.boldLabel);
+        GUILayout.Label("Spider Setup v5", EditorStyles.boldLabel);
         GUILayout.Space(6);
-        _body = (GameObject)EditorGUILayout.ObjectField("Body", _body, typeof(GameObject), true);
+        _body = (GameObject)EditorGUILayout.ObjectField("Body", _body,
+                                                         typeof(GameObject), true);
         GUILayout.Space(6);
-
         GUI.backgroundColor = new Color(1f, .4f, .4f);
         if (GUILayout.Button("Supprimer les pattes", GUILayout.Height(28)))
             if (_body) Cleanup();
@@ -250,31 +299,34 @@ public class SpiderSetupWindow : EditorWindow
         GUI.backgroundColor = new Color(.4f, 1f, .5f);
         if (GUILayout.Button("GENERER L'ARAIGNEE", GUILayout.Height(44)))
         {
-            if (!_body) { EditorUtility.DisplayDialog("Erreur", "Glisse ton Body !", "OK"); return; }
+            if (!_body) { EditorUtility.DisplayDialog("Erreur","Glisse ton Body !","OK"); return; }
             Build();
         }
         GUI.backgroundColor = Color.white;
     }
 
+    // -------------------------------------------------------
     void Cleanup()
     {
         for (int i = _body.transform.childCount - 1; i >= 0; i--)
         {
             var c = _body.transform.GetChild(i);
-            if (c.name.StartsWith("Leg_") || c.name.StartsWith("Pole_") || c.name == "CameraTarget")
+            if (c.name.StartsWith("Leg_") || c.name.StartsWith("Pole_") ||
+                c.name == "CameraTarget")
                 DestroyImmediate(c.gameObject);
         }
     }
 
+    // -------------------------------------------------------
     void Build()
     {
         Cleanup();
 
         // Rigidbody
-        Rigidbody rb = _body.GetComponent<Rigidbody>() ?? _body.AddComponent<Rigidbody>();
-        rb.mass      = 1f;
-        rb.linearDamping  = 5f;
-        rb.angularDamping = 5f;
+        var rb = _body.GetComponent<Rigidbody>() ?? _body.AddComponent<Rigidbody>();
+        rb.mass       = 1f;
+        rb.linearDamping  = 6f;
+        rb.angularDamping = 6f;
         rb.freezeRotation = true;
         rb.interpolation  = RigidbodyInterpolation.Interpolate;
         rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
@@ -284,7 +336,8 @@ public class SpiderSetupWindow : EditorWindow
             _body.AddComponent<SphereCollider>().radius = 0.38f;
 
         // Controller
-        SpiderController ctrl = _body.GetComponent<SpiderController>() ?? _body.AddComponent<SpiderController>();
+        var ctrl = _body.GetComponent<SpiderController>()
+                   ?? _body.AddComponent<SpiderController>();
 
         // CameraTarget
         var ct = new GameObject("CameraTarget");
@@ -293,115 +346,107 @@ public class SpiderSetupWindow : EditorWindow
         ctrl.cameraTarget = ct.transform;
 
         // -------------------------------------------------------
-        // Définition des 8 pattes
-        // shoulderLocal = position epaule sur le body
-        // restLocal     = ou le pied doit reposer (body space)
-        // poleLocal     = direction du genou (body space)
+        // 8 pattes
+        // shoulder = position épaule (local body)
+        // rest     = position repos pied (local body)
+        // pole     = hint direction genou (local body)
         // -------------------------------------------------------
-        // Les pôles sont TOUJOURS du même côté que les pattes (X)
-        // et VERS LE HAUT (Y+) pour que le genou plie correctement
-        var defs = new (string name, Vector3 shoulder, Vector3 rest, Vector3 poleLocal)[]
+        var defs = new[]
         {
-            // Gauche (X negatif) - avant vers arriere
-            ("Leg_L1", new Vector3(-0.30f, 0f,  0.40f), new Vector3(-1.0f, -0.4f,  0.85f), new Vector3(-1.2f, 0.6f,  0.5f)),
-            ("Leg_L2", new Vector3(-0.34f, 0f,  0.13f), new Vector3(-1.0f, -0.4f,  0.25f), new Vector3(-1.2f, 0.6f,  0.2f)),
-            ("Leg_L3", new Vector3(-0.34f, 0f, -0.13f), new Vector3(-1.0f, -0.4f, -0.25f), new Vector3(-1.2f, 0.6f, -0.2f)),
-            ("Leg_L4", new Vector3(-0.30f, 0f, -0.40f), new Vector3(-1.0f, -0.4f, -0.85f), new Vector3(-1.2f, 0.6f, -0.5f)),
-            // Droite (X positif) - avant vers arriere
-            ("Leg_R1", new Vector3( 0.30f, 0f,  0.40f), new Vector3( 1.0f, -0.4f,  0.85f), new Vector3( 1.2f, 0.6f,  0.5f)),
-            ("Leg_R2", new Vector3( 0.34f, 0f,  0.13f), new Vector3( 1.0f, -0.4f,  0.25f), new Vector3( 1.2f, 0.6f,  0.2f)),
-            ("Leg_R3", new Vector3( 0.34f, 0f, -0.13f), new Vector3( 1.0f, -0.4f, -0.25f), new Vector3( 1.2f, 0.6f, -0.2f)),
-            ("Leg_R4", new Vector3( 0.30f, 0f, -0.40f), new Vector3( 1.0f, -0.4f, -0.85f), new Vector3( 1.2f, 0.6f, -0.5f)),
+            // Gauche
+            ("Leg_L1", new Vector3(-0.30f,0f, 0.40f), new Vector3(-1.0f,-0.4f, 0.85f), new Vector3(-1.1f,0.5f, 0.6f)),
+            ("Leg_L2", new Vector3(-0.34f,0f, 0.13f), new Vector3(-1.0f,-0.4f, 0.25f), new Vector3(-1.1f,0.5f, 0.1f)),
+            ("Leg_L3", new Vector3(-0.34f,0f,-0.13f), new Vector3(-1.0f,-0.4f,-0.25f), new Vector3(-1.1f,0.5f,-0.1f)),
+            ("Leg_L4", new Vector3(-0.30f,0f,-0.40f), new Vector3(-1.0f,-0.4f,-0.85f), new Vector3(-1.1f,0.5f,-0.6f)),
+            // Droite
+            ("Leg_R1", new Vector3( 0.30f,0f, 0.40f), new Vector3( 1.0f,-0.4f, 0.85f), new Vector3( 1.1f,0.5f, 0.6f)),
+            ("Leg_R2", new Vector3( 0.34f,0f, 0.13f), new Vector3( 1.0f,-0.4f, 0.25f), new Vector3( 1.1f,0.5f, 0.1f)),
+            ("Leg_R3", new Vector3( 0.34f,0f,-0.13f), new Vector3( 1.0f,-0.4f,-0.25f), new Vector3( 1.1f,0.5f,-0.1f)),
+            ("Leg_R4", new Vector3( 0.30f,0f,-0.40f), new Vector3( 1.0f,-0.4f,-0.85f), new Vector3( 1.1f,0.5f,-0.6f)),
         };
 
         SpiderLeg[] legs = new SpiderLeg[8];
         for (int i = 0; i < defs.Length; i++)
         {
-            var d = defs[i];
-            legs[i] = MakeLeg(d.name, d.shoulder, d.rest, d.poleLocal);
+            var (n, sh, rest, pl) = defs[i];
+            legs[i] = MakeLeg(n, sh, rest, pl);
         }
 
         // Couples diagonaux
-        Pair(legs[0], legs[7]); // L1 <-> R4
-        Pair(legs[1], legs[6]); // L2 <-> R3
-        Pair(legs[2], legs[5]); // L3 <-> R2
-        Pair(legs[3], legs[4]); // L4 <-> R1
+        Pair(legs[0], legs[7]);
+        Pair(legs[1], legs[6]);
+        Pair(legs[2], legs[5]);
+        Pair(legs[3], legs[4]);
 
         EditorUtility.SetDirty(_body);
         EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
-        EditorUtility.DisplayDialog("OK", "Araignee generee !\nLance Play et utilise ZQSD.", "Super !");
+        EditorUtility.DisplayDialog("OK","Araignee generee ! Lance Play → ZQSD","Super !");
     }
 
-    SpiderLeg MakeLeg(string legName, Vector3 shoulderLocal, Vector3 restLocal, Vector3 poleLocal)
+    // -------------------------------------------------------
+    SpiderLeg MakeLeg(string legName, Vector3 shLocal, Vector3 restLocal, Vector3 poleLocal)
     {
-        // --- Racine de la patte ---
+        // Racine
         var root = new GameObject(legName);
         root.transform.SetParent(_body.transform);
-        root.transform.localPosition = shoulderLocal;
+        root.transform.localPosition = shLocal;
+        root.transform.localRotation = Quaternion.identity;
 
-        // Oriente la racine VERS le pied de repos (en world space)
-        // => les capsules partent dans le bon sens des la génération
-        Vector3 worldShoulder = _body.transform.TransformPoint(shoulderLocal);
-        Vector3 worldRest     = _body.transform.TransformPoint(restLocal);
-        Vector3 legDir        = (worldRest - worldShoulder).normalized;
-        if (legDir == Vector3.zero) legDir = Vector3.right;
-        root.transform.rotation = Quaternion.LookRotation(legDir, Vector3.up);
-
-        // --- Joint épaule ---
+        // Épaule (joint 1)
         var sh = new GameObject("Shoulder");
         sh.transform.SetParent(root.transform);
         sh.transform.localPosition = Vector3.zero;
         sh.transform.localRotation = Quaternion.identity;
 
-        // Mesh cuisse — le long de Z local (vers le pied)
+        // Mesh cuisse
         var thigh = GameObject.CreatePrimitive(PrimitiveType.Capsule);
         thigh.name = "Thigh";
         thigh.transform.SetParent(sh.transform);
-        thigh.transform.localPosition = new Vector3(0f, 0f, 0.27f);
-        thigh.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        thigh.transform.localPosition = new Vector3(0f, 0.27f, 0f);
+        thigh.transform.localRotation = Quaternion.identity;
         thigh.transform.localScale    = new Vector3(0.09f, 0.27f, 0.09f);
         DestroyImmediate(thigh.GetComponent<CapsuleCollider>());
 
-        // --- Joint genou ---
+        // Genou (joint 2)
         var kn = new GameObject("Knee");
         kn.transform.SetParent(sh.transform);
-        kn.transform.localPosition = new Vector3(0f, 0f, 0.55f);
+        kn.transform.localPosition = new Vector3(0f, 0.55f, 0f);
         kn.transform.localRotation = Quaternion.identity;
 
         // Mesh tibia
         var shin = GameObject.CreatePrimitive(PrimitiveType.Capsule);
         shin.name = "Shin";
         shin.transform.SetParent(kn.transform);
-        shin.transform.localPosition = new Vector3(0f, 0f, 0.27f);
-        shin.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        shin.transform.localPosition = new Vector3(0f, 0.27f, 0f);
+        shin.transform.localRotation = Quaternion.identity;
         shin.transform.localScale    = new Vector3(0.07f, 0.27f, 0.07f);
         DestroyImmediate(shin.GetComponent<CapsuleCollider>());
 
-        // Pied visuel
+        // Pied
         var foot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
         foot.name = "Foot";
         foot.transform.SetParent(kn.transform);
-        foot.transform.localPosition = new Vector3(0f, 0f, 0.55f);
+        foot.transform.localPosition = new Vector3(0f, 0.55f, 0f);
         foot.transform.localScale    = Vector3.one * 0.09f;
         DestroyImmediate(foot.GetComponent<SphereCollider>());
 
-        // --- Pole hint ---
+        // Pole
         var pole = new GameObject("Pole_" + legName);
         pole.transform.SetParent(_body.transform);
         pole.transform.localPosition = poleLocal;
 
-        // --- Composant SpiderLeg ---
+        // Composant
         var leg = root.AddComponent<SpiderLeg>();
-        leg.shoulderJoint = sh.transform;
-        leg.kneeJoint     = kn.transform;
-        leg.pole          = pole.transform;
-        leg.restLocal     = restLocal;
-        leg.upperLen      = 0.55f;
-        leg.lowerLen      = 0.55f;
-        leg.stepDist      = 0.32f;
-        leg.stepHeight    = 0.15f;
-        leg.stepSpeed     = 10f;
-        leg.floorOff      = 0.04f;
+        leg.shoulderBone = sh.transform;
+        leg.kneeBone     = kn.transform;
+        leg.poleTarget   = pole.transform;
+        leg.restLocal    = restLocal;
+        leg.upperLen     = 0.55f;
+        leg.lowerLen     = 0.55f;
+        leg.stepDist     = 0.32f;
+        leg.stepHeight   = 0.16f;
+        leg.stepSpeed    = 9f;
+        leg.groundOff    = 0.04f;
 
         return leg;
     }
